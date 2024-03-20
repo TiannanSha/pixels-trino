@@ -30,6 +30,7 @@ import io.pixelsdb.pixels.common.turbo.InvokerFactory;
 import io.pixelsdb.pixels.common.turbo.Output;
 import io.pixelsdb.pixels.common.turbo.WorkerType;
 import io.pixelsdb.pixels.core.PixelsFooterCache;
+import io.pixelsdb.pixels.core.TypeDescription;
 import io.pixelsdb.pixels.core.utils.Pair;
 import io.pixelsdb.pixels.executor.join.JoinAlgorithm;
 import io.pixelsdb.pixels.executor.predicate.TableScanFilter;
@@ -44,6 +45,7 @@ import io.pixelsdb.pixels.planner.plan.physical.output.JoinOutput;
 import io.pixelsdb.pixels.planner.plan.physical.output.ScanOutput;
 import io.pixelsdb.pixels.trino.exception.PixelsErrorCode;
 import io.pixelsdb.pixels.trino.impl.PixelsTrinoConfig;
+import io.pixelsdb.pixels.trino.vector.lshnns.CachedLSHIndex;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.*;
 
@@ -115,6 +117,12 @@ public class PixelsPageSourceProvider implements ConnectorPageSourceProvider
 
         try
         {
+            List<PixelsColumnHandle> columnHandles = tableHandle.getColumns();
+            if (columnHandles.size()==1
+                    && columnHandles.get(0).getTypeCategory() == TypeDescription.Category.VECTOR) {
+                // update the LSH index in every node
+                CachedLSHIndex.getInstance().setCurrColumn(columnHandles.get(0));
+            }
             if (pixelsSplit.getTableType() == Table.TableType.AGGREGATED)
             {
                 // perform aggregation push down.

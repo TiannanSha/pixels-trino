@@ -56,6 +56,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.google.common.base.Preconditions.checkState;
+import static io.trino.spi.type.DoubleType.DOUBLE;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -406,6 +407,7 @@ class PixelsPageSource implements ConnectorPageSource
                     blocks[fieldId] = new LazyBlock(rowBatchSize, new PixelsBlockLoader(
                             vector, type, typeCategory, rowBatchSize));
                 }
+                // update the current column in cached LSH index
             } catch (IOException e)
             {
                 closeWithSuppression(e);
@@ -586,6 +588,19 @@ class PixelsPageSource implements ConnectorPageSource
                         DictionaryColumnVector dscv = (DictionaryColumnVector) vector;
                         Block dictionary = new VariableWidthBlock(dscv.dictOffsets.length - 1,
                                 Slices.wrappedBuffer(dscv.dictArray), dscv.dictOffsets, Optional.empty());
+                        if (!dscv.noNulls)
+                        {
+                            // Issue #84: Trino's stupid DictionaryBlock stores null value in dictionary.
+                            int nullValueId = dictionary.getPositionCount();
+                            dictionary = dictionary.copyWithAppendedNull();
+                            for (int i = 0; i < batchSize; ++i)
+                            {
+                                if (dscv.isNull[i])
+                                {
+                                    dscv.ids[i] = nullValueId;
+                                }
+                            }
+                        }
                         block = DictionaryBlock.create(batchSize, dictionary, dscv.ids);
                     }
                     break;
@@ -620,6 +635,26 @@ class PixelsPageSource implements ConnectorPageSource
                      * And this block builder builds a LongArrayBlock.
                      */
                     block = new LongArrayBlock(batchSize, Optional.ofNullable(tscv.isNull), tscv.times);
+                    break;
+                case VECTOR:
+                    VectorColumnVector vcv = (VectorColumnVector) vector;
+                    // builder that simply concatenate all double arrays
+                    BlockBuilder allDoublesBuilder = DOUBLE.createBlockBuilder(null, batchSize * vcv.dimension);
+                    int[] offsets = new int[batchSize+1];
+                    // build a block into which we put a double array
+                    for (int i = 0 ; i < batchSize; i++) {
+                        offsets[i] = i * vcv.dimension;
+                        for (int j = 0; j < vcv.dimension; j++) {
+                            DOUBLE.writeDouble(allDoublesBuilder, vcv.vector[i][j]);
+                        }
+                    }
+                    offsets[batchSize] = batchSize * vcv.dimension;
+                    // after extensive research on how other connectors deal with array type, the following seems to
+                    // be the way to go: basically we stuff all the values of all arrays into one big block, and provide
+                    // an int[] as offsets to tell trino where each array begins and ends. Note that the final offset
+                    // should be the position to tell trino the end of the final array
+                    // Interestingly all the above is NOT documented in trino documentation or code at all.
+                    block = ArrayBlock.fromElementBlock(batchSize, Optional.of(vcv.isNull), offsets, allDoublesBuilder.build());
                     break;
                 default:
                     BlockBuilder blockBuilder = type.createBlockBuilder(null, batchSize);
